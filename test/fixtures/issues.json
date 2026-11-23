@@ -1,0 +1,7 @@
+{
+  "url": "https://github.com/example/terminal-demo/issues/7",
+  "number": 7,
+  "title": "子进程输出经管道转发后颜色消失",
+  "body": "终端直连时有颜色，经父进程转发后颜色消失。",
+  "context": "父进程收到的原始字节含 ANSI 颜色码，写入日志后才看不到颜色。"
+}

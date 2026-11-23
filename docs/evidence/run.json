@@ -1,0 +1,364 @@
+{
+  "executedAt": "2026-11-23T08:17:51.633Z",
+  "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/585",
+  "contextText": "我这次失败的请求已持续输出了非空文本，最后一条模型事件注明达到输出长度上限，传给解析器的文本缺少 </wiki_structure>。",
+  "before": {
+    "sessionId": "9c673252-be06-439b-b934-2f4d6656d2d8",
+    "status": "ready",
+    "revision": 1,
+    "result": {
+      "changes": [],
+      "clarifications": [
+        {
+          "question": "复现时 Docker 镜像内 adalflow 与 openai 的实际安装版本（docker compose exec deepwiki pip list | grep -Ei 'adalflow|openai'）是多少？",
+          "whyItMatters": "版本决定默认走 Responses 还是 Chat Completions，直接影响是修解包还是加版本/配置锁定。"
+        },
+        {
+          "question": "除 gpt-4o 外，换其他 OpenAI 模型（如 gpt-4o-mini）是否同样报 ResponseCreatedEvent 错误？",
+          "whyItMatters": "若仅部分模型报错，指向服务端路由或代理差异，而非统一的解包不匹配。"
+        },
+        {
+          "question": "用的是内置 openai provider 还是自定义 OpenAI 兼容端点？.env 中是否设置了 OPENAI_BASE_URL？",
+          "whyItMatters": "自定义端点往往只实现 Chat Completions，修复方向应偏向显式选择 API 形态而非只兼容 Responses 事件。"
+        }
+      ],
+      "hypotheses": [
+        {
+          "claim": "OpenAI 流式分支直接访问 chunk.choices（报告指向 L169 附近），而 adalflow 1.1.3 + openai 1.109.1 的 client 默认走 Responses API，事件对象无 choices，故首个事件即抛 AttributeError，且在 yield 任何文本前失败。R1 摘录止于 Ollama/OpenRouter 段，未包含 OpenAI 分支，此点仍属报告陈述加下游代码可解释性推断。",
+          "evidenceIds": [
+            "I1",
+            "R1",
+            "R2"
+          ],
+          "howToCheck": "在 OpenAI streamer 异步循环首迭代处打印 type(chunk).__name__ 与 hasattr(chunk,'choices')/hasattr(chunk,'delta')，重跑一次生成；若首条为 ResponseCreatedEvent 且无任何对象带 choices，则假设成立。"
+        },
+        {
+          "claim": "research.py 的 stream_and_fallback 捕获所有非 token-limit 异常，记日志后把 \"Error with openai API: ...\" 当正常文本 yield（R2），故调用方拿到非 XML 的错误字符串，结构解析再抛 No valid <wiki_structure> XML，形成第二层误导性错误。",
+          "evidenceIds": [
+            "R2",
+            "I1"
+          ],
+          "howToCheck": "比对同一时刻日志顺序：先出现 provider 错误日志，随后出现 parse_wiki_structure 的 ValueError；并在返回文本中检索是否含 \"Error with openai API\" 前缀。"
+        },
+        {
+          "claim": "这是解包层不匹配而非密钥或网络错误：R1 显示各 provider 各自解包（Ollama 用 chunk.message），OpenAI 分支沿用 chat-completions 假设。若用户侧 OPENAI_BASE_URL 指向仅支持 Chat Completions 的代理，现象形态可能不同（如 404 而非 AttributeError）。",
+          "evidenceIds": [
+            "R1",
+            "I1"
+          ],
+          "howToCheck": "检查 .env 是否设置 OPENAI_BASE_URL/代理，并用同一 key 直连官方端点复跑；若直连仍报 ResponseCreatedEvent，则与代理无关。"
+        }
+      ],
+      "limitations": [
+        "R1 覆盖 _stream.py L43–L122，止于 Ollama/OpenRouter 段，未直接看到 OpenAI 分支的 chunk.choices 写法，该行仍属报告者陈述。",
+        "本轮未取证 api/services/wiki/structure.py 与 tests/backend/services/test_deep_research.py，二次 XML 错误与现有测试覆盖均未核实。",
+        "未运行任何代码或测试，也未取得报告者日志、请求 ID 或部署版本，结论基于固定提交 f216676 的快照。"
+      ],
+      "steps": [
+        {
+          "action": "在 OpenAI streamer 加临时诊断（DEBUG 级）：打印前 3 个 chunk 的类型名、是否含 choices/delta/output_text，并统计循环总 chunk 数与是否异常退出；不要记录完整请求响应正文。",
+          "evidenceIds": [
+            "I1",
+            "R1"
+          ],
+          "expectedObservation": "日志显示首个事件为 ResponseCreatedEvent 等对象、choices 缺失计数为 0，且循环在产出文本前以 AttributeError 结束；若反而看到 ChatCompletionChunk，则原根因假设被推翻。"
+        },
+        {
+          "action": "在仓库内检索所有消费流式 chunk.choices 的位置（含 OpenAI 分支与其他 provider），确认受影响范围。",
+          "evidenceIds": [
+            "R1"
+          ],
+          "expectedObservation": "仅 OpenAI 相关分支命中；若别处也命中，则修复面需同步扩大，避免只改一处后其他功能继续报同类错误。"
+        },
+        {
+          "action": "实现兼容解包：Responses 事件按 output_text delta 提取文本，保留 chat-completions 形态分支，全部用 getattr 判定；无文本事件应跳过而不是抛错。",
+          "evidenceIds": [
+            "I1",
+            "R1"
+          ],
+          "expectedObservation": "用伪造混合事件序列（ResponseCreatedEvent + 文本 delta）能持续产出文本，非文本事件不产生空串或异常。"
+        },
+        {
+          "action": "为 respond_stream 增加单元测试：注入只含 Responses 事件形状的异步迭代器，断言正常产出文本且不抛 AttributeError；再注入 chat-completions 形状，断言旧行为不回退。",
+          "evidenceIds": [
+            "I1",
+            "R1"
+          ],
+          "expectedObservation": "两个用例同时通过；若仅 Responses 用例通过而旧形状失败，说明兼容层写成单向替换，需要修正。"
+        },
+        {
+          "action": "改善错误可诊断性：在 research.py 的异常分支或结构解析入口，当上游已产出 provider 错误文本时标记/跳过结构解析，并把原始错误置于日志首位。",
+          "evidenceIds": [
+            "R2",
+            "I1"
+          ],
+          "expectedObservation": "注入一次人为流失败后，日志首条为带 provider 名与异常类型的 provider 级错误，XML 解析错误不再作为唯一显眼错误出现。"
+        },
+        {
+          "action": "核对依赖：确认镜像内实际安装的 adalflow/openai 版本以及 OpenAI client 是否可配置为 Chat Completions；若不可控，在依赖或 client 构造处固定 API 形态。",
+          "evidenceIds": [
+            "I1"
+          ],
+          "expectedObservation": "镜像内版本与 Issue 所述一致且有明确配置项或锁定；若版本不一致，需报告者提供 docker 内 pip list 输出后再判断。"
+        }
+      ],
+      "summary": "报告称 OpenAI 流式返回 Responses 事件而代码按 Chat Completions 取 choices，首个 chunk 即抛错，wiki 结构解析随之误报 XML 错误。已确认 research.py 把流异常转成错误文本继续输出，与二次误报一致；OpenAI 分支本体本轮未取证。",
+      "issue": {
+        "title": "OpenAI streaming fails: 'ResponseCreatedEvent' object has no attribute 'choices'",
+        "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/585"
+      },
+      "evidence": [
+        {
+          "id": "I1",
+          "kind": "issue",
+          "label": "OpenAI streaming fails: 'ResponseCreatedEvent' object has no attribute 'choices'",
+          "excerpt": "## Summary\n\nWiki generation fails on the OpenAI provider. `respond_stream` in\n`api/chat/_stream.py` consumes the stream assuming Chat Completions\nchunks (`chunk.choices`), but adalflow returns Responses API events,\nwhich have no `choices` attribute.\n\n## Environment\n\n- adalflow 1.1.3\n- openai 1.109.1\n- Python 3.11\n- Docker build from `main`\n- Provider: openai, model gpt-4o\n\n## Error\n`2026-09-07 08:52:01 - ERROR - deepwiki.api.services.research - Error with openai API: 'ResponseCreatedEvent' object has no attribute 'choices'\nTraceback (most recent call last):\nFile \"/app/api/services/research.py\"",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/585"
+        },
+        {
+          "id": "R1",
+          "kind": "repo_excerpt",
+          "label": "api/chat/_stream.py · L43–L122",
+          "excerpt": "        model = model or model_config.get(\"model\")\n        logger.info(\"Using %s with model: %s\", provider, model)\n        registered = ChatStreamer._registry.get(provider, None)\n        if registered:\n            return registered(model=model, model_config=model_config)\n        raise RuntimeError(f\"Provider {provider} not registered\")\n\n    @abstractmethod\n    def respond_stream(self, prompt: str) -> AsyncIterator[str]:\n        raise NotImplementedError(\n            f\"{type(self).__name__} does not implement `respond_stream`\"\n        )\n\n\nclass OllamaChatStreamer(ChatStreamer):\n    provider = \"ollama\"\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        from adalflow.components.model_client.ollama_client import OllamaClient\n\n        self.client = OllamaClient()\n        self.model_kwargs = {\n            \"model\": model,\n            \"stream\": True,\n            \"options\": {\n                \"temperature\": model_config[\"temperature\"],\n                \"top_p\": model_config[\"top_p\"],\n                \"num_ctx\": model_config[\"num_ctx\"],\n            },\n        }\n\n        logger.debug(f\"Prompting Ollama with kwargs: {self.model_kwargs}\")\n\n    async def respond_stream(self, prompt: str) -> AsyncIterator[str]:\n        api_kwargs = self.client.convert_inputs_to_api_kwargs(\n            input=prompt\n            + \" /no_think\",  # todo I think this could be added into model kwargs?\n            model_kwargs=self.model_kwargs,\n            model_type=ModelType.LLM,\n        )\n\n        response: \"AsyncIterator[ChatResponse]\" = await self.client.acall(\n            api_kwargs=api_kwargs,\n            model_type=ModelType.LLM,\n        )\n\n        async for chunk in response:\n            if not hasattr(chunk, \"message\"):\n                raise RuntimeError(\n                    \"`message` field not found in response. Wrong ollama-python version probably.\",\n                )\n            text = chunk.message.content\n            if text:\n                text = text.replace(\"<think>\", \"\").replace(\"</think>\", \"\")\n                yield text\n\n\nclass OpenRouterChatStreamer(ChatStreamer):\n    provider = \"openrouter\"\n    error_hint = (\n        \"Please check that you have set the OPENROUTER_API_KEY \"\n        \"environment variable with a valid API key.\"\n    )\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        if not OPENROUTER_API_KEY:\n            logger.warning(\n                \"OPENROUTER_API_KEY not configured, but continuing with request\"\n            )\n            # We'll let the OpenRouterClient handle this and return a friendly error message\n        from api.clients import OpenRouterClient\n\n        self.client = OpenRouterClient()\n        self.model_kwargs = {\n            \"model\": model,\n            \"stream\": True,\n            \"temperature\": model_config[\"temperature\"],\n        }\n        if \"top_k\" in model_config:\n            self.model_kwargs[\"top_k\"] = model_config[\"top_k\"]",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/chat/_stream.py#L43-L122"
+        },
+        {
+          "id": "R2",
+          "kind": "repo_excerpt",
+          "label": "api/services/research.py · L252–L311",
+          "excerpt": "    else:\n        system_prompt = SIMPLE_CHAT_SYSTEM_PROMPT.format(\n            repo_type=repo_type,\n            repo_url=repo_url,\n            repo_name=repo_name,\n            language_name=language_name,\n        )\n\n    async def stream_and_fallback(\n        streamer: ChatStreamer,\n        prompt_func: Callable[[], str],\n        simplified_prompt_func: Callable[[], str],\n    ) -> AsyncIterator[str]:\n        try:\n            async for chunk in streamer.respond_stream(prompt_func()):\n                yield chunk\n        except Exception as e:\n            if is_token_limit_error(e):\n                logger.warning(\"Token limit exceeded, retrying without context\")\n                try:\n                    async for chunk in streamer.respond_stream(\n                        simplified_prompt_func()\n                    ):\n                        yield chunk\n                except Exception as e2:\n                    logger.error(\"Error in fallback streaming response: %s\", str(e2))\n                    yield (\n                        \"\\nI apologize, but your request is too large for me to process. \"\n                        \"Please try a shorter query or break it into smaller parts.\"\n                    )\n            else:\n                error_str = f\"Error with {streamer.provider} API: {e}\"\n                logger.error(error_str, exc_info=True)\n                if streamer.error_hint:\n                    error_str += f\"\\n\\n{streamer.error_hint}\"\n                yield \"\\n\" + error_str\n\n    model_config = get_model_config(request.provider, request.model)[\"model_kwargs\"]\n    chat_streamer = ChatStreamer.create(\n        provider=request.provider,\n        model=request.model,\n        model_config=model_config,\n    )\n\n    prompt_kwargs = {\n        \"system_prompt\": system_prompt,\n        \"query\": query,\n        \"conversation_history\": conversation_history,\n        \"context\": context_text,\n    }\n\n    prompt_func = partial(prompt_builder, **prompt_kwargs, simplify=False)\n    simplified_prompt_func = partial(prompt_builder, **prompt_kwargs, simplify=True)\n\n    return stream_and_fallback(\n        streamer=chat_streamer,\n        prompt_func=prompt_func,\n        simplified_prompt_func=simplified_prompt_func,\n    )\n",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/services/research.py#L252-L311"
+        }
+      ],
+      "sessionId": "9c673252-be06-439b-b934-2f4d6656d2d8",
+      "revision": 1
+    },
+    "trace": [
+      {
+        "tool": "read_issue",
+        "outcome": "I1 · 已读取标题和正文"
+      },
+      {
+        "tool": "search_repo",
+        "purpose": "定位 respond_stream 实现文件",
+        "outcome": "返回 1 个路径"
+      },
+      {
+        "tool": "search_repo",
+        "purpose": "定位 research 服务中的流式回退逻辑",
+        "outcome": "返回 3 个路径"
+      },
+      {
+        "tool": "read_excerpt",
+        "purpose": "查看 respond_stream 的流式解析与异常处理",
+        "outcome": "R1 · api/chat/_stream.py · L43–L122"
+      },
+      {
+        "tool": "read_excerpt",
+        "purpose": "查看 research 服务对流的消费与回退行为",
+        "outcome": "R2 · api/services/research.py · L252–L311"
+      },
+      {
+        "tool": "submit_analysis",
+        "outcome": "data/steps/0 must have required property 'evidenceIds'"
+      },
+      {
+        "tool": "submit_analysis",
+        "outcome": "已校验并提交"
+      }
+    ],
+    "error": null,
+    "pendingContext": null
+  },
+  "after": {
+    "sessionId": "9c673252-be06-439b-b934-2f4d6656d2d8",
+    "status": "ready",
+    "revision": 2,
+    "result": {
+      "summary": "补充背景显示该次请求已产出文本、因输出长度上限截断而缺闭合标签，与 Issue 中\"首个 chunk 即报 choices 缺失\"属不同样本。R3 已证实 OpenAI 兼容基类直接链式取 chunk.choices，需分别修复解包与截断两条路径。",
+      "hypotheses": [
+        {
+          "claim": "OpenAI/Azure/LiteLLM 共用的 _OpenAICompatStreamer 在循环里直接链式访问 chunk.choices[0].delta.content（L168–L173），Responses 事件无 choices 即抛 AttributeError。这与 I1 回溯定位到 _stream.py:169 的 chunk.choices 吻合，可解释样本 A（无文本产出即失败）。",
+          "evidenceIds": [
+            "R3",
+            "I1"
+          ],
+          "howToCheck": "核对部署版本 traceback 行号与当前提交 L169 是否对齐，或在首迭代打印 type(chunk).__name__ 与 hasattr(chunk,'choices')；若首事件无 choices 且循环在产出文本前抛错，样本 A 成立。"
+        },
+        {
+          "claim": "补充背景（C1）描述的是另一条失败链：文本已产出且最后事件注明达到输出长度上限，传给解析器的文本缺 </wiki_structure>，因此结构解析 ValueError 是截断直接后果，不需要 AttributeError 参与。两个样本不能相互否定，需按请求 ID/时间分别归因。",
+          "evidenceIds": [
+            "C1",
+            "I1"
+          ],
+          "howToCheck": "取 C1 那次的完整日志与返回文本：确认是否完全没有 'ResponseCreatedEvent' 相关 AttributeError、结束原因是否为长度上限、文本最后一个 wiki 标签是否未闭合。"
+        },
+        {
+          "claim": "research.py 的 stream_and_fallback 把所有非 token-limit 异常转成 \"Error with <provider> API: ...\" 文本 yield（R2），调用方会把这段错误串当 wiki 正文解析，从而在 provider 错误之后追加一条误导性 XML 错误——适用于样本 A 这类即时异常。",
+          "evidenceIds": [
+            "R2",
+            "I1"
+          ],
+          "howToCheck": "在失败请求返回文本中检索 'Error with openai API' 前缀，并核对日志顺序是否 provider 错误在前、parse_wiki_structure 的 ValueError 在后。"
+        },
+        {
+          "claim": "ResponseCreatedEvent 的出现意味着 adalflow 侧对 OpenAI 走了 Responses API。R3 摘录不含 acall 调用与 model_kwargs 段，因此“能否通过配置固定为 Chat Completions”仍是未证实假设。",
+          "evidenceIds": [
+            "R3",
+            "I1"
+          ],
+          "howToCheck": "查看 api/clients 中 OpenAIClient 构造与传给 acall 的 api_kwargs；并比对镜像内 adalflow/openai 版本是否与 Issue 一致。"
+        }
+      ],
+      "steps": [
+        {
+          "action": "对齐两个样本的日志：按时间与请求 ID 提取 C1 那次与 Issue 回溯那次的 provider 错误行、是否出现 'ResponseCreatedEvent' AttributeError、以及模型结束原因（finish_reason/status）与产出文本长度。",
+          "expectedObservation": "样本 A 无文本产出并伴 AttributeError；样本 B 有非空文本、结束原因为长度上限、无 AttributeError。若两者同时出现 AttributeError 与文本，则说明是叠加问题，需按叠加方案修复。",
+          "evidenceIds": [
+            "I1",
+            "C1",
+            "R2"
+          ]
+        },
+        {
+          "action": "改 _OpenAICompatStreamer 的解包逻辑：全部走 getattr——存在 choices 时取 delta.content，存在 Responses 文本字段（output_text 或 delta 文本）时取该文本，其余事件（created/in_progress/completed 等）跳过而不抛错。",
+          "expectedObservation": "用伪造事件序列（ResponseCreatedEvent + 若干文本 delta + completed）驱动 respond_stream，能持续产出非空文本且不抛 AttributeError；chat-completions 形状的旧用例仍通过。",
+          "evidenceIds": [
+            "R3",
+            "I1"
+          ]
+        },
+        {
+          "action": "处理截断路径：在 wiki 结构解析入口区分“上游结束原因为输出长度上限且缺 </wiki_structure>”与真正内容格式错误，前者给出明确的截断提示（含提高输出上限或缩小上下文的建议），并保证 provider 错误文本不被当作文本解析。",
+          "expectedObservation": "注入一段无闭合标签且标记长度上限的文本，报错信息明确指出截断而非笼统的 No valid <wiki_structure> XML；注入 'Error with openai API: ...' 文本时不再产生 XML 解析错误作为唯一显眼错误。",
+          "evidenceIds": [
+            "C1",
+            "R2",
+            "I1"
+          ]
+        },
+        {
+          "action": "排查 wiki 结构生成的输出上限配置（model_kwargs 中的 max_tokens/max_output_tokens 来源），对大仓库提高上限或改为分段生成章节结构。",
+          "expectedObservation": "能定位到唯一配置点并调整；复跑同一仓库时模型结束原因不再是长度上限，结构文本以闭合 </wiki_structure> 结束。",
+          "evidenceIds": [
+            "C1"
+          ]
+        },
+        {
+          "action": "补充诊断日志：记录每个流的各类事件计数（choices 事件数、Responses 文本事件数、其他事件数）与最终结束原因，不记录请求与响应正文。",
+          "expectedObservation": "以后同类报告可仅凭计数与结束原因区分是解包不匹配、截断还是上游错误文本透传。",
+          "evidenceIds": [
+            "R3",
+            "C1"
+          ]
+        }
+      ],
+      "clarifications": [
+        {
+          "question": "补充背景里那次请求的日志中，是否同时出现 \"'ResponseCreatedEvent' object has no attribute 'choices'\"？",
+          "whyItMatters": "决定是单一截断问题，还是解包错误与截断叠加，从而决定修复优先级与是否必须同时改两处。"
+        },
+        {
+          "question": "该次请求返回文本里是否含 \"Error with openai API\" 之类的错误前缀，模型的结束原因字段具体是什么？",
+          "whyItMatters": "用于判定文本是正常模型输出后截断，还是错误文本被透传，从而区分 R2 的异常转文本路径与纯截断路径。"
+        },
+        {
+          "question": "wiki 结构生成时配置的最大输出 token 是多少，是否使用同一 model_config 生成概要与章节？",
+          "whyItMatters": "若上限偏小，除修解包外还需调整上限或分段生成，否则长仓库仍会命中截断。"
+        }
+      ],
+      "changes": [
+        {
+          "description": "R3 证实 _OpenAICompatStreamer（OpenAI/Azure/LiteLLM 共用）在 L168–L173 直接链式访问 chunk.choices[0].delta.content，与 Issue 回溯行号一致，解包不匹配假设升级为有代码证据，且修复面覆盖三个 provider。",
+          "evidenceIds": [
+            "R3",
+            "I1"
+          ]
+        },
+        {
+          "description": "补充背景 C1 使原“首个 chunk 即失败、下游收到空串”的单一因果不再适用于该样本：文本已产出、因长度上限截断而缺闭合标签。分析改为并列处理截断路径，并保留对新样本的环境/请求对齐要求。",
+          "evidenceIds": [
+            "C1",
+            "I1"
+          ]
+        }
+      ],
+      "limitations": [
+        "读取 api/services/wiki/structure.py 的锚点未命中（found:false），故 parse_wiki_structure 如何生成 'No valid <wiki_structure> XML' 以及是否有截断分支仍未取证。",
+        "R3 摘录始于 _OpenAICompatStreamer.respond_stream 循环体中部，未看到 acall 调用、时序注解与 model_kwargs 构造，无法确认 API 形态是否可配置，也未确认输出 token 上限来源。",
+        "未运行任何代码或测试，也未取得两个样本的日志、请求 ID、部署提交与 pip list，结论基于固定提交 f216676 的静态快照。",
+        "本轮仓库调用预算已用尽（剩余 0），未能核对 tests/unit/test_chat.py 的现有流式测试覆盖。"
+      ],
+      "issue": {
+        "title": "OpenAI streaming fails: 'ResponseCreatedEvent' object has no attribute 'choices'",
+        "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/585"
+      },
+      "evidence": [
+        {
+          "id": "I1",
+          "kind": "issue",
+          "label": "OpenAI streaming fails: 'ResponseCreatedEvent' object has no attribute 'choices'",
+          "excerpt": "## Summary\n\nWiki generation fails on the OpenAI provider. `respond_stream` in\n`api/chat/_stream.py` consumes the stream assuming Chat Completions\nchunks (`chunk.choices`), but adalflow returns Responses API events,\nwhich have no `choices` attribute.\n\n## Environment\n\n- adalflow 1.1.3\n- openai 1.109.1\n- Python 3.11\n- Docker build from `main`\n- Provider: openai, model gpt-4o\n\n## Error\n`2026-09-07 08:52:01 - ERROR - deepwiki.api.services.research - Error with openai API: 'ResponseCreatedEvent' object has no attribute 'choices'\nTraceback (most recent call last):\nFile \"/app/api/services/research.py\"",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/585"
+        },
+        {
+          "id": "R1",
+          "kind": "repo_excerpt",
+          "label": "api/chat/_stream.py · L43–L122",
+          "excerpt": "        model = model or model_config.get(\"model\")\n        logger.info(\"Using %s with model: %s\", provider, model)\n        registered = ChatStreamer._registry.get(provider, None)\n        if registered:\n            return registered(model=model, model_config=model_config)\n        raise RuntimeError(f\"Provider {provider} not registered\")\n\n    @abstractmethod\n    def respond_stream(self, prompt: str) -> AsyncIterator[str]:\n        raise NotImplementedError(\n            f\"{type(self).__name__} does not implement `respond_stream`\"\n        )\n\n\nclass OllamaChatStreamer(ChatStreamer):\n    provider = \"ollama\"\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        from adalflow.components.model_client.ollama_client import OllamaClient\n\n        self.client = OllamaClient()\n        self.model_kwargs = {\n            \"model\": model,\n            \"stream\": True,\n            \"options\": {\n                \"temperature\": model_config[\"temperature\"],\n                \"top_p\": model_config[\"top_p\"],\n                \"num_ctx\": model_config[\"num_ctx\"],\n            },\n        }\n\n        logger.debug(f\"Prompting Ollama with kwargs: {self.model_kwargs}\")\n\n    async def respond_stream(self, prompt: str) -> AsyncIterator[str]:\n        api_kwargs = self.client.convert_inputs_to_api_kwargs(\n            input=prompt\n            + \" /no_think\",  # todo I think this could be added into model kwargs?\n            model_kwargs=self.model_kwargs,\n            model_type=ModelType.LLM,\n        )\n\n        response: \"AsyncIterator[ChatResponse]\" = await self.client.acall(\n            api_kwargs=api_kwargs,\n            model_type=ModelType.LLM,\n        )\n\n        async for chunk in response:\n            if not hasattr(chunk, \"message\"):\n                raise RuntimeError(\n                    \"`message` field not found in response. Wrong ollama-python version probably.\",\n                )\n            text = chunk.message.content\n            if text:\n                text = text.replace(\"<think>\", \"\").replace(\"</think>\", \"\")\n                yield text\n\n\nclass OpenRouterChatStreamer(ChatStreamer):\n    provider = \"openrouter\"\n    error_hint = (\n        \"Please check that you have set the OPENROUTER_API_KEY \"\n        \"environment variable with a valid API key.\"\n    )\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        if not OPENROUTER_API_KEY:\n            logger.warning(\n                \"OPENROUTER_API_KEY not configured, but continuing with request\"\n            )\n            # We'll let the OpenRouterClient handle this and return a friendly error message\n        from api.clients import OpenRouterClient\n\n        self.client = OpenRouterClient()\n        self.model_kwargs = {\n            \"model\": model,\n            \"stream\": True,\n            \"temperature\": model_config[\"temperature\"],\n        }\n        if \"top_k\" in model_config:\n            self.model_kwargs[\"top_k\"] = model_config[\"top_k\"]",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/chat/_stream.py#L43-L122"
+        },
+        {
+          "id": "R2",
+          "kind": "repo_excerpt",
+          "label": "api/services/research.py · L252–L311",
+          "excerpt": "    else:\n        system_prompt = SIMPLE_CHAT_SYSTEM_PROMPT.format(\n            repo_type=repo_type,\n            repo_url=repo_url,\n            repo_name=repo_name,\n            language_name=language_name,\n        )\n\n    async def stream_and_fallback(\n        streamer: ChatStreamer,\n        prompt_func: Callable[[], str],\n        simplified_prompt_func: Callable[[], str],\n    ) -> AsyncIterator[str]:\n        try:\n            async for chunk in streamer.respond_stream(prompt_func()):\n                yield chunk\n        except Exception as e:\n            if is_token_limit_error(e):\n                logger.warning(\"Token limit exceeded, retrying without context\")\n                try:\n                    async for chunk in streamer.respond_stream(\n                        simplified_prompt_func()\n                    ):\n                        yield chunk\n                except Exception as e2:\n                    logger.error(\"Error in fallback streaming response: %s\", str(e2))\n                    yield (\n                        \"\\nI apologize, but your request is too large for me to process. \"\n                        \"Please try a shorter query or break it into smaller parts.\"\n                    )\n            else:\n                error_str = f\"Error with {streamer.provider} API: {e}\"\n                logger.error(error_str, exc_info=True)\n                if streamer.error_hint:\n                    error_str += f\"\\n\\n{streamer.error_hint}\"\n                yield \"\\n\" + error_str\n\n    model_config = get_model_config(request.provider, request.model)[\"model_kwargs\"]\n    chat_streamer = ChatStreamer.create(\n        provider=request.provider,\n        model=request.model,\n        model_config=model_config,\n    )\n\n    prompt_kwargs = {\n        \"system_prompt\": system_prompt,\n        \"query\": query,\n        \"conversation_history\": conversation_history,\n        \"context\": context_text,\n    }\n\n    prompt_func = partial(prompt_builder, **prompt_kwargs, simplify=False)\n    simplified_prompt_func = partial(prompt_builder, **prompt_kwargs, simplify=True)\n\n    return stream_and_fallback(\n        streamer=chat_streamer,\n        prompt_func=prompt_func,\n        simplified_prompt_func=simplified_prompt_func,\n    )\n",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/services/research.py#L252-L311"
+        },
+        {
+          "id": "C1",
+          "kind": "user_context",
+          "label": "补充背景 1",
+          "excerpt": "我这次失败的请求已持续输出了非空文本，最后一条模型事件注明达到输出长度上限，传给解析器的文本缺少 </wiki_structure>。"
+        },
+        {
+          "id": "R3",
+          "kind": "repo_excerpt",
+          "label": "api/chat/_stream.py · L168–L247",
+          "excerpt": "            if (\n                chunk.choices\n                and chunk.choices[0].delta is not None\n                and chunk.choices[0].delta.content is not None\n            ):\n                yield chunk.choices[0].delta.content\n\n\nclass OpenAIChatStreamer(_OpenAICompatStreamer):\n    provider = \"openai\"\n    error_hint = (\n        \"Please check that you have set the OPENAI_API_KEY \"\n        \"environment variable with a valid API key.\"\n    )\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        if not OPENAI_API_KEY:\n            logger.warning(\"OPENAI_API_KEY not configured, but continuing with request\")\n\n        super().__init__(model=model, model_config=model_config)\n\n    def _build_client(self):\n        from api.clients import OpenAIClient\n\n        return OpenAIClient()\n\n\nclass AzureChatStreamer(_OpenAICompatStreamer):\n    provider = \"azure\"\n    error_hint = (\n        \"Please check that you have set the AZURE_OPENAI_API_KEY, \"\n        \"AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION \"\n        \"environment variables with valid values.\"\n    )\n\n    def _build_client(self):\n        from api.clients import AzureAIClient\n\n        return AzureAIClient()\n\n\nclass LiteLLMChatStreamer(_OpenAICompatStreamer):\n    provider = \"litellm\"\n    error_hint = (\n        \"Please check that you have set the LITELLM_API_KEY \"\n        \"environment variable with a valid API key.\"\n    )\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        if not LITELLM_API_KEY:\n            logger.warning(\n                \"LITELLM_API_KEY not configured, but continuing with request\"\n            )\n            # We'll let the OpenAIClient handle this and return an error message\n\n        super().__init__(model=model, model_config=model_config)\n\n    def _build_client(self):\n        from api.clients import LiteLLMClient\n\n        return LiteLLMClient()\n\n\nclass BedrockChatStreamer(ChatStreamer):\n    provider = \"bedrock\"\n    error_hint = (\n        \"Please check that you have set the AWS_ACCESS_KEY_ID \"\n        \"and AWS_SECRET_ACCESS_KEY environment variables with valid credentials.\"\n    )\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):\n        if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:\n            logger.warning(\n                \"AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY not configured, but continuing with request\"\n            )\n            # We'll let the BedrockClient handle this and return an error message\n        from api.clients import BedrockClient\n\n        self.client = BedrockClient()\n        self.model_kwargs = {\"model\": model}",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/chat/_stream.py#L168-L247"
+        }
+      ],
+      "sessionId": "9c673252-be06-439b-b934-2f4d6656d2d8",
+      "revision": 2
+    },
+    "trace": [
+      {
+        "tool": "search_repo",
+        "purpose": "定位 chat streamer 实现文件以查看 OpenAI 分支",
+        "outcome": "返回 8 个路径"
+      },
+      {
+        "tool": "search_repo",
+        "purpose": "定位 wiki 结构解析文件以核对截断导致的 XML 错误",
+        "outcome": "返回 8 个路径"
+      },
+      {
+        "tool": "read_excerpt",
+        "purpose": "确认 OpenAI 分支如何解包 chunk 及是否设置输出长度上限",
+        "outcome": "R3 · api/chat/_stream.py · L168–L247"
+      },
+      {
+        "tool": "read_excerpt",
+        "purpose": "确认结构解析在文本被截断缺闭合标签时的报错路径",
+        "outcome": "文件内未命中"
+      },
+      {
+        "tool": "submit_analysis",
+        "outcome": "已校验并提交"
+      }
+    ],
+    "error": null,
+    "pendingContext": null
+  }
+}

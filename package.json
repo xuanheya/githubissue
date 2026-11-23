@@ -1,0 +1,22 @@
+{
+  "name": "github-issue-advisor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node --test test/*.test.js",
+    "test:browser": "node test/browser-smoke.mjs",
+    "demo:live": "node scripts/demo-live.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "htmlparser2": "10.0.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.58.2"
+  }
+}
