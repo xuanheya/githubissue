@@ -10,7 +10,7 @@ async function api(path, body) {
     response = await fetch(base + path, { method: body ? "POST" : "GET", headers, cache: "no-store",
       credentials: "omit", redirect: "error", signal: AbortSignal.timeout(8000),
       ...(body ? { body: JSON.stringify(body) } : {}) });
-  } catch { throw Object.assign(new Error("无法连接本地后端，请确认 npm start 已运行。"), { code: "offline" }); }
+  } catch { throw Object.assign(new Error("无法连接本地后端，请确认 uv run python -m backend 已运行。"), { code: "offline" }); }
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error?.message || "后端请求失败。"), { code: data.error?.code });
   return data;

@@ -46,8 +46,19 @@
 
   function resultNodes(result) {
     const nodes = [link(result.issue.title, result.issue.url), section("问题摘要", [make("p", result.summary)])];
-    if (result.changes.length) nodes.push(section("本次更新", [items(result.changes, false,
+    if (result.changes.length) nodes.push(section("本次变化", [items(result.changes, false,
       row => [make("span", row.description), refs(row.evidenceIds)])]));
+    nodes.push(section("调查证据", [items(result.evidence, false, record => {
+      const label = record.id + " · " + record.label;
+      const source = record.url ? link(label, record.url) : make("strong", label);
+      const excerpt = make("details");
+      excerpt.append(make("summary", record.kind === "repo_excerpt" ? "查看源码片段" : "查看原文"), make("pre", record.excerpt || "（空）"));
+      return [source, excerpt];
+    })]));
+    nodes.push(section("可能根因", [result.hypotheses.length ? items(result.hypotheses, true, row => [
+      make("strong", (row.id ? row.id + " · " : "") + row.claim), make("p", row.howToCheck), refs(row.evidenceIds),
+      ...(row.counterEvidenceIds?.length ? [make("small", "削弱此判断的证据 " + row.counterEvidenceIds.join(" · "))] : [])
+    ]) : make("p", "现有信息不足以定位根因。")]));
     nodes.push(section("建议处理步骤", [items(result.steps, true, step => [
       make("strong", step.action), make("p", "验证方式：" + step.expectedObservation), refs(step.evidenceIds)
     ])]));
@@ -59,17 +70,10 @@
   function details(view, expanded) {
     const fold = make("details");
     fold.open = expanded;
-    fold.append(make("summary", "假设、证据与本轮工具记录"));
+    fold.append(make("summary", "调查范围与工具记录"));
     const result = view.result;
     if (result) {
-      if (result.hypotheses.length) fold.append(section("待验证假设", [items(result.hypotheses, false,
-        row => [make("strong", row.claim), make("p", row.howToCheck), refs(row.evidenceIds)])]));
-      for (const record of result.evidence) {
-        const card = make("div", undefined, "evidence");
-        const label = record.id + " · " + record.label;
-        card.append(record.url ? link(label, record.url) : make("strong", label), make("pre", record.excerpt || "（空）"));
-        fold.append(card);
-      }
+      if (result.investigation) fold.append(make("p", `本轮仓库调用 ${result.investigation.repoCalls} 次，模型调用 ${result.investigation.modelCalls} 次。`));
       if (result.limitations.length) fold.append(section("分析限制", [items(result.limitations, false, v => [make("span", v)])]));
     }
     if (view.trace?.length) fold.append(section("本轮调用", [items(view.trace, true, t =>

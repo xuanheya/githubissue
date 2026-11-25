@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Issue 处理建议",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "在公开 GitHub Issue 页面生成有依据的处理建议，并根据补充背景更新。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwL22OftoS6lgIJp+zLdLImN69ygAP1kRfNof5FkneNHiihvLHvMU4ImMAaJr1GdIzzYe77tbJMv+fGNCoGIWExjKc9Q30sVEGpvtvfPG9lWikWY7PE26QDUaSXA5+oVwcP3nBVM2WMjgjHBrHZfuPAcDQsLSB8KcuR8cLYnSuVBYAJ8uH2ZSH02KtsOm0II7SxSilI1U6wUYTqwCUPNKPZb8Ra5ZOa9V4UsjkY+tPcuhIZn77TYkqao00ARknu2spUpDJNlyiNlW4hUAJN2ug03clVtIhAP92rMs9jPG27E0tplL1qba4c6Uyxpr4xFackKVLnGIoWTUZfFpT2uaMQIDAQAB",
   "permissions": [

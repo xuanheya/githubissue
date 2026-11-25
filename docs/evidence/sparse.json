@@ -1,0 +1,195 @@
+{
+  "executedAt": "2026-11-25T04:44:47.908Z",
+  "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/613",
+  "before": {
+    "sessionId": "4f696a6e-f034-4e1b-b1e6-07181e060017",
+    "status": "ready",
+    "revision": 1,
+    "result": {
+      "summary": "报告只有“so slow / 花了一个小时”这一句，未说明发生在哪个阶段（仓库索引、Wiki 生成、问答或其他）、仓库规模、所用模型与部署方式，因此现有证据不足以指向任何具体根因。代码侧可确认项目至少有三类耗时来源：prepare 阶段的仓库索引以 10 秒心跳的 SSE 事件流呈现（R2）；Wiki 由后台任务 generate_repo_wiki 批量生成（R1）；问答走按 provider/model 选择的流式 ChatStreamer（R3）。这些只是候选来源，不能证明实际耗时分布、数据规模或运行时复杂度。建议先向报告者澄清阶段与时间线，再按其答复聚焦调查；三条假设均已列为待验证。",
+      "hypotheses": [
+        {
+          "id": "H1",
+          "claim": "“一小时”指首次生成整仓 Wiki 的端到端耗时（含仓库索引/嵌入 + 多页 LLM 生成），在大仓库或较慢/免费模型下属设计内的长时间任务，而非缺陷。",
+          "evidenceIds": [
+            "R1",
+            "R2"
+          ],
+          "counterEvidenceIds": [],
+          "howToCheck": "在报告者仓库上，令 Wiki 缓存已热后重跑：若耗时仍稳定为一小时且耗时随仓库文件数/模型速度变化，则 H1 成立；若缓存命中仍慢，或小仓库也慢，则应怀疑其他原因。"
+        },
+        {
+          "id": "H2",
+          "claim": "耗时集中在 prepare 阶段的仓库索引（抓取/嵌入），期间只收到 elapsed 递增的心跳、没有阶段细分，用户看到的就是长时间无实质进度。",
+          "evidenceIds": [
+            "R2",
+            "R1"
+          ],
+          "counterEvidenceIds": [],
+          "howToCheck": "查该部署日志中 prepare 请求开始到 “Repo indexing complete” 的间隔；若接近一小时且 Wiki 任务在其后才开始，H2 成立。若索引在数分钟内结束而总时长仍为一小时，H2 被推翻。"
+        },
+        {
+          "id": "H3",
+          "claim": "若慢的现象发生在问答场景，延迟主要来自上游 LLM 供应商的流式响应（ChatStreamer 直连所选 provider/model），而非本地代码；同问题换 provider/model 应观察到显著差异。",
+          "evidenceIds": [
+            "R3",
+            "I1"
+          ],
+          "counterEvidenceIds": [],
+          "howToCheck": "记录首 token 延迟并对同一问题切换模型/供应商重试；若延迟随供应商大幅变化，指向 H3；若各供应商都慢且检索阶段（embedding/向量检索）耗时占比高，则 H3 被削弱。"
+        }
+      ],
+      "steps": [
+        {
+          "action": "请报告者指明卡住的阶段并给出时间线（例如“点准备仓库后进度条停留 50 分钟”、“生成 Wiki 停在某一页”、“提问后无输出”）。",
+          "expectedObservation": "若答复指向 Wiki 生成，优先验证 H1；若指向准备阶段的 elapsed 心跳长期增长，优先验证 H2；若指向提问，优先验证 H3。",
+          "evidenceIds": [
+            "I1",
+            "R2"
+          ]
+        },
+        {
+          "action": "在该部署日志中检索 prepare 与 Wiki 任务相关记录（如 “Repo indexing complete”“Repo indexing failed” 及 Wiki 任务提交/完成时间），计算各阶段起止间隔。",
+          "expectedObservation": "可明确一小时落在索引阶段还是 Wiki 生成阶段；若索引与生成各占一部分，需要进一步拆分页面级生成耗时。",
+          "evidenceIds": [
+            "R1",
+            "R2"
+          ]
+        },
+        {
+          "action": "向报告者索取仓库标识（公开 URL 或本地目录）、大致文件数与所选 LLM/嵌入模型及部署方式（官方 demo、自托管 Docker 或本地开发）。",
+          "expectedObservation": "若为大仓库 + 慢模型/免费额度，H1 的解释力上升；若仓库很小仍耗时一小时，H1 被削弱，需转为检查索引或模型调用是否被限流/重试。",
+          "evidenceIds": [
+            "I1"
+          ]
+        },
+        {
+          "action": "若现象在问答侧，采集首 token 延迟，并用同一问题切换另一 provider/model 复测。",
+          "expectedObservation": "延迟随供应商明显变化支持 H3；各供应商相近则需检查本地检索与提示构造耗时。",
+          "evidenceIds": [
+            "R3",
+            "I1"
+          ]
+        }
+      ],
+      "clarifications": [
+        {
+          "question": "“一个小时”具体发生在哪个阶段：准备仓库（索引）阶段的进度等待、生成 Wiki 页面、提问后的回答，还是导出/幻灯片等其他操作？",
+          "whyItMatters": "不同阶段对应完全不同的代码路径（R1/R2/R3）与排查手段；阶段未知时任何根因判断都是猜测。"
+        },
+        {
+          "question": "这一小时是首次出现还是每次都有？之后复用同一仓库（Wiki 已缓存、索引已就绪）是否仍需一小时？",
+          "whyItMatters": "缓存未命中的长任务与每次都慢指向不同原因，也决定 H1 是否只是首次冷启动的预期耗时。"
+        },
+        {
+          "question": "期间界面上是否有任何进度反馈（例如准备阶段的 elapsed 秒数在增长、Wiki 逐页出现），还是完全静止、最终报错/超时？",
+          "whyItMatters": "“仍在推进但很慢”与“卡死/超时”是两类问题；R2 的事件流只有 elapsed 心跳，可据此区分 慢 与 断流。"
+        },
+        {
+          "question": "使用的是哪个仓库（公开 URL 或本地目录、大致文件数与主要语言）、哪个 LLM 与嵌入模型/供应商？",
+          "whyItMatters": "仓库规模与模型速度是解释生成耗时的关键变量；缺失时无法判断一小时是否属于该配置下的正常量级。"
+        },
+        {
+          "question": "部署方式是什么（官方在线 demo、自托管 Docker、本地开发），是否经过反向代理或受限网络？",
+          "whyItMatters": "网络与代理会影响仓库抓取、嵌入调用和流式响应；R2 中的心跳机制正是为规避代理超时，部署差异可能改变表现。"
+        }
+      ],
+      "changes": [],
+      "limitations": [
+        "部分检索结果受文件树、扫描或返回数量上限影响。",
+        "Issue 正文未提供阶段、日志、时间戳、仓库规模、模型与部署信息，无法定位根因；本次仅列出候选耗时来源。",
+        "代码证据来自快照 commit f216676fa37042c04eba3ccef56098d011670913，不等于报告者实际部署版本。",
+        "未阅读 Wiki 生成（generate_repo_wiki）与 RAG 检索的完整实现，无法判断调用次数、并发度或重试行为，也未做任何运行测试或性能测量。",
+        "静态代码片段不能证明实际耗时、数据规模或运行时复杂度；“一小时”是否异常仍需与报告者配置下的预期量级对比。"
+      ],
+      "evidence": [
+        {
+          "id": "I1",
+          "kind": "issue",
+          "label": "so slow",
+          "excerpt": "so slow \nis it my problem？why it takes me an hour？！",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/613"
+        },
+        {
+          "id": "R1",
+          "kind": "repo_excerpt",
+          "label": "api/routers/wiki.py · L1–L80",
+          "path": "api/routers/wiki.py",
+          "firstLine": 1,
+          "lastLine": 80,
+          "excerpt": "import asyncio\nimport os\nimport re\nfrom datetime import datetime\nfrom typing import Optional, Literal\nfrom urllib.parse import quote\n\nfrom fastapi import APIRouter, HTTPException, Query\nfrom fastapi.responses import JSONResponse, Response, StreamingResponse\n\nfrom api.config import WIKI_AUTH_CODE, WIKI_AUTH_MODE, configs\nfrom api.logger import get_logger\nfrom api.schemas import (\n    ProcessedProjectEntry,\n    WikiCacheData,\n    WikiExportRequest,\n    WikiTaskSummary,\n    WikiTaskRequest,\n    WikiTaskSubmitResult,\n    WikiTaskStatus,\n    TaskStatus,\n)\nfrom api.services.wiki import (\n    delete_wiki_cache,\n    export_wiki,\n    generate_repo_wiki,\n    list_processed_projects,\n    list_wiki_cache,\n    read_wiki_cache,\n    registry,\n    WikiTask,\n)\n\nlogger = get_logger(__name__)\n\nrouter = APIRouter(tags=[\"wiki\"])\n\n\ndef _attachment_header(filename: str) -> str:\n    \"\"\"Build a Content-Disposition value that is safe for any file name.\n\n    Header values are encoded as latin-1, so a non-ASCII name (for example a\n    local repository in a Chinese directory) cannot go in ``filename=``. Send\n    an ASCII fallback there and the real name in ``filename*`` (RFC 6266).\n    \"\"\"\n    fallback = re.sub(r'[^A-Za-z0-9._-]', \"_\", filename)\n    return (\n        f'attachment; filename=\"{fallback}\"; '\n        f\"filename*=UTF-8''{quote(filename, safe='')}\"\n    )\n\n\n@router.post(\"/export/wiki\")\nasync def post_export_wiki(request: WikiExportRequest):\n    \"\"\"\n    Export wiki content as Markdown or JSON.\n\n    Args:\n        request: The export request containing wiki pages and format\n\n    Returns:\n        A downloadable file in the requested format\n    \"\"\"\n    logger.info(f\"Exporting wiki for {request.repo_url} in {request.format} format\")\n\n    # Extract repository name from URL for the filename\n    repo_parts = request.repo_url.rstrip(\"/\").split(\"/\")\n    repo_name = repo_parts[-1] if len(repo_parts) > 0 else \"wiki\"\n\n    timestamp = datetime.now()\n\n    content = export_wiki(\n        request.repo_url,\n        pages=request.pages,\n        format=request.format,\n        timestamp=timestamp,\n    )\n    filename = f\"{repo_name}_wiki_{timestamp.strftime('%Y%m%d_%H%M%S')}\"\n\n    if request.format == \"markdown\":",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/routers/wiki.py#L1-L80"
+        },
+        {
+          "id": "R2",
+          "kind": "repo_excerpt",
+          "label": "api/routers/repo.py · L1–L70",
+          "path": "api/routers/repo.py",
+          "firstLine": 1,
+          "lastLine": 70,
+          "excerpt": "import asyncio\nimport json\n\nfrom fastapi import APIRouter, Query\nfrom fastapi.responses import StreamingResponse\n\nfrom api.logger import get_logger\nfrom api.rag import repo_index_exist\nfrom api.repository import Repo\nfrom api.schemas import RepoPrepareRequest\nfrom api.services.research import prepare_repo_index as prepare_index\n\nlogger = get_logger(__name__)\n\nrouter = APIRouter(prefix=\"/repo\", tags=[\"repo\"])\n\n\n# Heartbeat cadence MUST stay below the frontend proxy / undici bodyTimeout\n# (undici default = 300s). 10s keeps the connection alive with wide margin.\n_HEARTBEAT_INTERVAL_SEC = 10\n\n\n@router.post(\"/prepare\")\nasync def prepare_repo_index(request: RepoPrepareRequest):\n    async def event_stream():\n        # Fast path: cache already warm -> return immediately.\n        if repo_index_exist(Repo(repo_url=request.repo_url, repo_type=request.type)):\n            yield \"event: ready\\ndata: already indexed\\n\\n\"\n            yield \"event: done\\ndata: ok\\n\\n\"\n            return\n\n        # First byte -> response headers are flushed now (kills the timeout).\n        yield \": indexing-start\\n\\n\"\n\n        task = asyncio.create_task(prepare_index(request))\n        elapsed = 0\n        # Wait on the task, but wake up every interval to emit a heartbeat.\n        while not task.done():\n            try:\n                # shield: a heartbeat timeout must NOT cancel the indexing task.\n                await asyncio.wait_for(\n                    asyncio.shield(task), timeout=_HEARTBEAT_INTERVAL_SEC\n                )\n            except asyncio.TimeoutError:\n                elapsed += _HEARTBEAT_INTERVAL_SEC\n                yield f\"event: progress\\ndata: {json.dumps({'elapsed_sec': elapsed})}\\n\\n\"\n            except Exception:\n                # Task raised; break out and report via task.exception() below.\n                break\n\n        exc = task.exception()\n        if exc is not None:\n            logger.error(\"Repo indexing failed for %s: %s\", request.repo_url, exc)\n            yield f\"event: error\\ndata: {json.dumps({'error': str(exc)})}\\n\\n\"\n        else:\n            logger.info(\"Repo indexing complete for %s\", request.repo_url)\n            yield \"event: done\\ndata: ok\\n\\n\"\n\n    return StreamingResponse(\n        event_stream(),\n        media_type=\"text/event-stream\",\n        headers={\n            \"Cache-Control\": \"no-cache, no-transform\",\n            \"X-Accel-Buffering\": \"no\",  # disable proxy buffering (nginx etc.)\n        },\n    )\n\n\n@router.get(\"/index/status\")\nasync def repo_index_status(",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/routers/repo.py#L1-L70"
+        },
+        {
+          "id": "R3",
+          "kind": "repo_excerpt",
+          "label": "api/chat/_stream.py · L1–L60",
+          "path": "api/chat/_stream.py",
+          "firstLine": 1,
+          "lastLine": 60,
+          "excerpt": "from abc import ABC, abstractmethod\nfrom collections.abc import AsyncIterator\nfrom typing import TYPE_CHECKING\n\nfrom adalflow.core.types import ModelType\n\nfrom api.config import (\n    AWS_ACCESS_KEY_ID,\n    AWS_SECRET_ACCESS_KEY,\n    GOOGLE_API_KEY,\n    LITELLM_API_KEY,\n    OPENAI_API_KEY,\n    OPENROUTER_API_KEY,\n)\nfrom api.logger import get_logger\n\nif TYPE_CHECKING:\n    from ollama import ChatResponse\n    from openai import AsyncStream\n    from openai.types.chat import ChatCompletionChunk\n\n    from api.clients import OpenAIClient\n\nMODEL_CFG = dict[str, str | int | float]\n\nlogger = get_logger(\"chat\")\n\n\nclass ChatStreamer(ABC):\n    _registry: dict[str, type[\"ChatStreamer\"]] = {}\n    provider: str\n    error_hint: str | None = None\n\n    def __init_subclass__(cls, **kwargs) -> None:\n        super().__init_subclass__(**kwargs)\n        if provider := getattr(cls, \"provider\", None):\n            ChatStreamer._registry[provider] = cls\n\n    @classmethod\n    def create(\n        cls, *, provider: str, model: str | None = None, model_config: MODEL_CFG\n    ) -> \"ChatStreamer\":\n        model = model or model_config.get(\"model\")\n        logger.info(\"Using %s with model: %s\", provider, model)\n        registered = ChatStreamer._registry.get(provider, None)\n        if registered:\n            return registered(model=model, model_config=model_config)\n        raise RuntimeError(f\"Provider {provider} not registered\")\n\n    @abstractmethod\n    def respond_stream(self, prompt: str) -> AsyncIterator[str]:\n        raise NotImplementedError(\n            f\"{type(self).__name__} does not implement `respond_stream`\"\n        )\n\n\nclass OllamaChatStreamer(ChatStreamer):\n    provider = \"ollama\"\n\n    def __init__(self, *, model: str, model_config: MODEL_CFG):",
+          "url": "https://github.com/AsyncFuncAI/deepwiki-open/blob/f216676fa37042c04eba3ccef56098d011670913/api/chat/_stream.py#L1-L60"
+        }
+      ],
+      "issue": {
+        "url": "https://github.com/AsyncFuncAI/deepwiki-open/issues/613",
+        "title": "so slow"
+      },
+      "investigation": {
+        "strategy": "investigate",
+        "repoCalls": 5,
+        "modelCalls": 4,
+        "commit": "f216676fa37042c04eba3ccef56098d011670913"
+      },
+      "sessionId": "4f696a6e-f034-4e1b-b1e6-07181e060017",
+      "revision": 1
+    },
+    "error": null,
+    "pendingContext": null,
+    "trace": [
+      {
+        "tool": "read_issue",
+        "outcome": "I1 · github_api"
+      },
+      {
+        "tool": "glob",
+        "purpose": "{\"pattern\":\"**/*.py\"}",
+        "outcome": "找到 72 个候选路径"
+      },
+      {
+        "tool": "glob",
+        "purpose": "{\"pattern\":\"**/*.ts*\"}",
+        "outcome": "找到 41 个候选路径"
+      },
+      {
+        "tool": "read_file",
+        "purpose": "{\"file_id\":\"F53\",\"start_line\":1,\"end_line\":80}",
+        "outcome": "R1 · api/routers/wiki.py · L1–L80"
+      },
+      {
+        "tool": "read_file",
+        "purpose": "{\"file_id\":\"F51\",\"start_line\":1,\"end_line\":70}",
+        "outcome": "R2 · api/routers/repo.py · L1–L70"
+      },
+      {
+        "tool": "read_file",
+        "purpose": "{\"file_id\":\"F23\",\"start_line\":1,\"end_line\":60}",
+        "outcome": "R3 · api/chat/_stream.py · L1–L60"
+      },
+      {
+        "tool": "submit_analysis",
+        "outcome": "结构和证据引用通过校验"
+      }
+    ]
+  }
+}
